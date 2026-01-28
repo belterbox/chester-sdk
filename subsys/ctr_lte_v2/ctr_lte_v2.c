@@ -1019,6 +1019,8 @@ static int ready_event_handler(enum ctr_lte_v2_event event)
 		transition_state(FSM_STATE_SLEEP);
 		break;
 	case CTR_LTE_V2_EVENT_TIMEOUT:
+#if !defined(CONFIG_CTR_LTE_V2_MODE_EDRX) && !defined(CONFIG_CTR_LTE_V2_MODE_HYBRID)
+		/* PSM mode only: Use CFUN=4 fallback if PSM not supported by network */
 		if (m_cereg_param.active_time == -1) { /* if PSM is not supported */
 			LOG_WRN("PSM is not supported, disabling LTE modem to save power");
 			int ret = ctr_lte_v2_flow_close_socket();
@@ -1034,6 +1036,12 @@ static int ready_event_handler(enum ctr_lte_v2_event event)
 			atomic_set_bit(&m_flag, FLAG_CFUN4);
 			return 0;
 		}
+#else
+		/* eDRX/Hybrid mode: Stay in READY state, modem handles power saving via eDRX */
+		/* No CFUN=4 fallback needed - eDRX provides light sleep while staying registered */
+		LOG_DBG("eDRX mode active: staying in READY state");
+#endif
+		break;
 	case CTR_LTE_V2_EVENT_ERROR:
 		transition_state(FSM_STATE_ERROR);
 		break;

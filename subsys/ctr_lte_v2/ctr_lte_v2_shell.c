@@ -482,6 +482,125 @@ static int cmd_reconnect(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_edrx_enable(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (!g_ctr_lte_v2_config.test) {
+		shell_error(shell, "test mode is not activated");
+		return -ENOEXEC;
+	}
+
+	const char *cycle = argc > 1 ? argv[1] : "0100";
+
+	/* Validate cycle value format (should be 4-bit binary string) */
+	if (strlen(cycle) != 4) {
+		shell_error(shell, "invalid cycle format, expected 4-bit binary (e.g., 0100)");
+		return -EINVAL;
+	}
+
+	for (int i = 0; i < 4; i++) {
+		if (cycle[i] != '0' && cycle[i] != '1') {
+			shell_error(shell, "invalid cycle format, expected binary digits only");
+			return -EINVAL;
+		}
+	}
+
+	ret = ctr_lte_v2_flow_edrx_enable(cycle);
+	if (ret) {
+		if (ret == -ENOTCONN) {
+			shell_warn(shell, "uart not enabled");
+			return 0;
+		}
+		LOG_ERR("Call `ctr_lte_v2_flow_edrx_enable` failed: %d", ret);
+		shell_error(shell, "command failed");
+		return ret;
+	}
+
+	shell_print(shell, "eDRX enabled with cycle: %s", cycle);
+	shell_print(shell, "command succeeded");
+
+	return 0;
+}
+
+static int cmd_edrx_disable(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc > 1) {
+		shell_error(shell, "command not found: %s", argv[1]);
+		shell_help(shell);
+		return -EINVAL;
+	}
+
+	if (!g_ctr_lte_v2_config.test) {
+		shell_error(shell, "test mode is not activated");
+		return -ENOEXEC;
+	}
+
+	ret = ctr_lte_v2_flow_edrx_disable();
+	if (ret) {
+		if (ret == -ENOTCONN) {
+			shell_warn(shell, "uart not enabled");
+			return 0;
+		}
+		LOG_ERR("Call `ctr_lte_v2_flow_edrx_disable` failed: %d", ret);
+		shell_error(shell, "command failed");
+		return ret;
+	}
+
+	shell_print(shell, "eDRX disabled");
+	shell_print(shell, "command succeeded");
+
+	return 0;
+}
+
+static int cmd_edrx_status(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc > 1) {
+		shell_error(shell, "command not found: %s", argv[1]);
+		shell_help(shell);
+		return -EINVAL;
+	}
+
+	if (!g_ctr_lte_v2_config.test) {
+		shell_error(shell, "test mode is not activated");
+		return -ENOEXEC;
+	}
+
+	char buf[64] = {0};
+	ret = ctr_lte_v2_flow_edrx_query(buf, sizeof(buf));
+	if (ret) {
+		if (ret == -ENOTCONN) {
+			shell_warn(shell, "uart not enabled");
+			return 0;
+		}
+		LOG_ERR("Call `ctr_lte_v2_flow_edrx_query` failed: %d", ret);
+		shell_error(shell, "command failed");
+		return ret;
+	}
+
+	shell_print(shell, "eDRX status: %s", strlen(buf) > 0 ? buf : "(disabled or not configured)");
+	shell_print(shell, "command succeeded");
+
+	return 0;
+}
+
+static int cmd_edrx_help(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc > 1) {
+		shell_error(shell, "command not found: %s", argv[1]);
+		shell_help(shell);
+		return -EINVAL;
+	}
+
+	shell_help(shell);
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -496,6 +615,26 @@ static int print_help(const struct shell *shell, size_t argc, char **argv)
 }
 
 /* clang-format off */
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_lte_edrx,
+
+	SHELL_CMD_ARG(enable, NULL,
+	              "Enable eDRX (format: enable [cycle]). Cycle is 4-bit binary:\n"
+	              "  0000=5.12s, 0001=10.24s, 0010=20.48s, 0011=40.96s,\n"
+	              "  0100=81.92s (default), 0101=163.84s, 0110=327.68s, 0111=655.36s",
+	              cmd_edrx_enable, 1, 1),
+
+	SHELL_CMD_ARG(disable, NULL,
+	              "Disable eDRX.",
+	              cmd_edrx_disable, 1, 0),
+
+	SHELL_CMD_ARG(status, NULL,
+	              "Query current eDRX settings.",
+	              cmd_edrx_status, 1, 0),
+
+	SHELL_SUBCMD_SET_END
+);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_lte_test,
@@ -519,6 +658,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(prepare, NULL, "Run prepare modem sequence.", cmd_test_prepare, 1, 0),
 
 	SHELL_CMD_ARG(bypass, NULL, "Switch to bypass mode.", cmd_test_bypass, 1, 1),
+
+	SHELL_CMD_ARG(edrx, &sub_lte_edrx,
+	              "eDRX commands.",
+	              cmd_edrx_help, 1, 0),
 
 	SHELL_SUBCMD_SET_END
 );

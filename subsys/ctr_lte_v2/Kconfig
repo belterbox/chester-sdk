@@ -76,6 +76,55 @@ config CTR_LTE_V2_GNSS
 	bool "CTR_LTE_V2_GNSS"
 	default y
 
+choice CTR_LTE_V2_POWER_MODE
+	prompt "LTE Power Saving Mode"
+	default CTR_LTE_V2_MODE_PSM
+	help
+	  Select the power saving mode for LTE connectivity.
+	  PSM (Power Saving Mode) provides maximum battery life with deep sleep.
+	  eDRX (extended Discontinuous Reception) provides lower latency with
+	  periodic reachability windows.
+	  Hybrid mode enables both PSM and eDRX together.
+
+config CTR_LTE_V2_MODE_PSM
+	bool "Power Saving Mode (PSM)"
+	help
+	  Use PSM for maximum battery life with infrequent transmissions.
+	  Device enters deep sleep between transmissions.
+	  Best for sensors sending data hourly or less frequently.
+
+config CTR_LTE_V2_MODE_EDRX
+	bool "Extended Discontinuous Reception (eDRX)"
+	help
+	  Use eDRX for lower latency with moderate power consumption.
+	  Device remains reachable with configurable paging cycles.
+	  Best for devices requiring faster downlink response (< 2 minutes).
+
+config CTR_LTE_V2_MODE_HYBRID
+	bool "Hybrid PSM + eDRX"
+	help
+	  Use both PSM and eDRX for balanced power and responsiveness.
+	  eDRX provides periodic reachability windows while PSM enables
+	  deep sleep between eDRX cycles when no communication is needed.
+
+endchoice
+
+config CTR_LTE_V2_EDRX_CYCLE
+	string "eDRX Cycle Value"
+	default "0100"
+	depends on CTR_LTE_V2_MODE_EDRX || CTR_LTE_V2_MODE_HYBRID
+	help
+	  eDRX cycle value as a 4-bit binary string for LTE-M:
+	    "0000" = 5.12s   (very low latency, high power)
+	    "0001" = 10.24s  (low latency)
+	    "0010" = 20.48s  (good balance)
+	    "0011" = 40.96s  (moderate latency)
+	    "0100" = 81.92s  (recommended for 60s polling)
+	    "0101" = 163.84s (lower power, higher latency)
+	    "0110" = 327.68s (very low power)
+	    "0111" = 655.36s (maximum cycle for LTE-M)
+	  For 60-second locker polling, use "0100" (81.92s) or "0011" (40.96s).
+
 config HEAP_MEM_POOL_SIZE
 	int "HEAP_MEM_POOL_SIZE"
 	default 8192

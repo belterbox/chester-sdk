@@ -428,12 +428,56 @@ int ctr_lte_v2_flow_prepare(void)
 		return ret;
 	}
 
-	/* TODO Configurable? */
+	/* Configure power saving mode based on Kconfig selection */
+#if defined(CONFIG_CTR_LTE_V2_MODE_EDRX)
+	/* eDRX mode: disable PSM, enable eDRX */
+	ret = ctr_lte_v2_talk_at_cpsms(&m_talk, (int[]){0}, NULL, NULL);
+	if (ret) {
+		LOG_ERR("Call `ctr_lte_v2_talk_at_cpsms` (disable) failed: %d", ret);
+		return ret;
+	}
+
+	/* Enable eDRX for LTE-M (act_type=4) with configured cycle value
+	 * Mode 2 enables eDRX and enables unsolicited result codes */
+	ret = ctr_lte_v2_talk_at_cedrxs(&m_talk, 2, 4, CONFIG_CTR_LTE_V2_EDRX_CYCLE);
+	if (ret) {
+		LOG_ERR("Call `ctr_lte_v2_talk_at_cedrxs` failed: %d", ret);
+		return ret;
+	}
+	LOG_INF("eDRX enabled with cycle: %s", CONFIG_CTR_LTE_V2_EDRX_CYCLE);
+
+#elif defined(CONFIG_CTR_LTE_V2_MODE_HYBRID)
+	/* Hybrid mode: enable both PSM and eDRX */
+	/* Use 18-second Active Time (T3324) to enable eDRX paging before PSM deep sleep */
+	ret = ctr_lte_v2_talk_at_cpsms(&m_talk, (int[]){1}, "00111000", "00001001");
+	if (ret) {
+		LOG_ERR("Call `ctr_lte_v2_talk_at_cpsms` failed: %d", ret);
+		return ret;
+	}
+
+	/* Enable eDRX for LTE-M (act_type=4) with configured cycle value */
+	ret = ctr_lte_v2_talk_at_cedrxs(&m_talk, 2, 4, CONFIG_CTR_LTE_V2_EDRX_CYCLE);
+	if (ret) {
+		LOG_ERR("Call `ctr_lte_v2_talk_at_cedrxs` failed: %d", ret);
+		return ret;
+	}
+	LOG_INF("Hybrid mode: PSM + eDRX enabled (T3324=18s, cycle=%s)", CONFIG_CTR_LTE_V2_EDRX_CYCLE);
+
+#else /* CONFIG_CTR_LTE_V2_MODE_PSM (default) */
+	/* PSM mode: enable PSM, disable eDRX */
 	ret = ctr_lte_v2_talk_at_cpsms(&m_talk, (int[]){1}, "00111000", "00000000");
 	if (ret) {
 		LOG_ERR("Call `ctr_lte_v2_talk_at_cpsms` failed: %d", ret);
 		return ret;
 	}
+
+	/* Explicitly disable eDRX to ensure clean state */
+	ret = ctr_lte_v2_talk_at_cedrxs(&m_talk, 0, 0, NULL);
+	if (ret) {
+		LOG_WRN("Call `ctr_lte_v2_talk_at_cedrxs` (disable) failed: %d", ret);
+		/* Not fatal - continue with PSM only */
+	}
+#endif
 
 	ret = ctr_lte_v2_talk_at_ceppi(&m_talk, 1);
 	if (ret) {
@@ -1165,6 +1209,67 @@ int ctr_lte_v2_flow_cmd_without_response(const char *s)
 	ret = ctr_lte_v2_talk_(&m_talk, s);
 	if (ret) {
 		LOG_ERR("Call `ctr_lte_v2_talk_` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+int ctr_lte_v2_flow_edrx_enable(const char *cycle)
+{
+	int ret;
+
+	if (!atomic_get(&m_started)) {
+		return -ENOTCONN;
+	}
+
+	/* Enable eDRX for LTE-M (act_type=4) with mode 2 (enable + URC) */
+	ret = ctr_lte_v2_talk_at_cedrxs(&m_talk, 2, 4, cycle);
+	if (ret) {
+		LOG_ERR("Call `ctr_lte_v2_talk_at_cedrxs` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("eDRX enabled with cycle: %s", cycle ? cycle : "network default");
+
+	return 0;
+}
+
+int ctr_lte_v2_flow_edrx_disable(void)
+{
+	int ret;
+
+	if (!atomic_get(&m_started)) {
+		return -ENOTCONN;
+	}
+
+	/* Disable eDRX */
+	ret = ctr_lte_v2_talk_at_cedrxs(&m_talk, 0, 0, NULL);
+	if (ret) {
+		LOG_ERR("Call `ctr_lte_v2_talk_at_cedrxs` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("eDRX disabled");
+
+	return 0;
+}
+
+int ctr_lte_v2_flow_edrx_query(char *buf, size_t size)
+{
+	int ret;
+
+	if (!buf || size == 0) {
+		return -EINVAL;
+	}
+
+	if (!atomic_get(&m_started)) {
+		return -ENOTCONN;
+	}
+
+	ret = ctr_lte_v2_talk_at_cedrxs_q(&m_talk, buf, size);
+	if (ret) {
+		LOG_ERR("Call `ctr_lte_v2_talk_at_cedrxs_q` failed: %d", ret);
 		return ret;
 	}
 

@@ -580,6 +580,50 @@ int ctr_lte_v2_talk_at_cpsms(struct ctr_lte_v2_talk *talk, int *p1, const char *
 	DIALOG_EPILOG /* clang-format on */
 }
 
+int ctr_lte_v2_talk_at_cedrxs(struct ctr_lte_v2_talk *talk, int mode, int act_type,
+			      const char *edrx_value)
+{
+	DIALOG_PROLOG /* clang-format off */
+
+	DIALOG_ENTER();
+	if (mode == 0) {
+		/* Disable eDRX */
+		DIALOG_SEND_LINE("AT+CEDRXS=0");
+	} else if (edrx_value) {
+		/* Enable eDRX with specific cycle value */
+		DIALOG_SEND_LINE("AT+CEDRXS=%d,%d,\"%s\"", mode, act_type, edrx_value);
+	} else {
+		/* Enable eDRX with network default */
+		DIALOG_SEND_LINE("AT+CEDRXS=%d,%d", mode, act_type);
+	}
+	DIALOG_LOOP_RUN(RESPONSE_TIMEOUT_S, {
+		DIALOG_LOOP_ABORT_ON_PFX("ERROR");
+		DIALOG_LOOP_BREAK_ON_STR("OK");
+	});
+	DIALOG_EXIT();
+
+	DIALOG_EPILOG /* clang-format on */
+}
+
+int ctr_lte_v2_talk_at_cedrxs_q(struct ctr_lte_v2_talk *talk, char *buf, size_t size)
+{
+	DIALOG_PROLOG /* clang-format off */
+
+	DIALOG_ENTER();
+	DIALOG_SEND_LINE("AT+CEDRXS?");
+	DIALOG_LOOP_RUN(RESPONSE_TIMEOUT_S, {
+		DIALOG_LOOP_ABORT_ON_PFX("ERROR");
+		if (!DIALOG_LOOP_GATHER_GET_COUNT()) {
+			DIALOG_LOOP_GATHER_PFX("+CEDRXS: ", buf, size);
+		} else {
+			DIALOG_LOOP_BREAK_ON_STR("OK");
+		}
+	});
+	DIALOG_EXIT();
+
+	DIALOG_EPILOG /* clang-format on */
+}
+
 int ctr_lte_v2_talk_at_cscon(struct ctr_lte_v2_talk *talk, int p1)
 {
 	DIALOG_PROLOG /* clang-format off */

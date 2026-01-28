@@ -76,6 +76,9 @@ int ctr_lte_v2_flow_coneval(void);
 
 int ctr_lte_v2_flow_wake_up_and_wait_on_ready(void);
 int ctr_lte_v2_flow_cmd_without_response(const char *s);
+int ctr_lte_v2_flow_edrx_enable(const char *cycle);
+int ctr_lte_v2_flow_edrx_disable(void);
+int ctr_lte_v2_flow_edrx_query(char *buf, size_t size);
 int ctr_lte_v2_flow_bypass_set_cb(ctr_lte_v2_flow_bypass_cb cb, void *user_data);
 int ctr_lte_v2_flow_bypass_write(const uint8_t *data, const size_t len);
 
