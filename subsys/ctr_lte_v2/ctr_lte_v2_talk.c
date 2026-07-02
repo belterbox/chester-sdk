@@ -580,6 +580,26 @@ int ctr_lte_v2_talk_at_cpsms(struct ctr_lte_v2_talk *talk, int *p1, const char *
 	DIALOG_EPILOG /* clang-format on */
 }
 
+int ctr_lte_v2_talk_at_cedrxs(struct ctr_lte_v2_talk *talk, int mode, int act_type,
+			      const char *cycle)
+{
+	DIALOG_PROLOG /* clang-format off */
+
+	DIALOG_ENTER();
+	if (cycle && cycle[0]) {
+		DIALOG_SEND_LINE("AT+CEDRXS=%d,%d,\"%s\"", mode, act_type, cycle);
+	} else {
+		DIALOG_SEND_LINE("AT+CEDRXS=%d,%d", mode, act_type);
+	}
+	DIALOG_LOOP_RUN(RESPONSE_TIMEOUT_S, {
+		DIALOG_LOOP_ABORT_ON_PFX("ERROR");
+		DIALOG_LOOP_BREAK_ON_STR("OK");
+	});
+	DIALOG_EXIT();
+
+	DIALOG_EPILOG /* clang-format on */
+}
+
 int ctr_lte_v2_talk_at_cscon(struct ctr_lte_v2_talk *talk, int p1)
 {
 	DIALOG_PROLOG /* clang-format off */
@@ -921,6 +941,54 @@ int ctr_lte_v2_talk_at_xsend(struct ctr_lte_v2_talk *talk, const void *buf, size
 	DIALOG_EPILOG /* clang-format on */
 }
 
+int ctr_lte_v2_talk_send_datamode(struct ctr_lte_v2_talk *talk, const char *trigger_cmd,
+				  const void *buf, size_t len)
+{
+	DIALOG_PROLOG /* clang-format off */
+
+	char xdm[16] = {0};
+
+	DIALOG_ENTER();
+	/* trigger_cmd is a caller-built AT command whose empty data argument puts
+	 * SLM into data-mode so the following bytes are taken raw (e.g.
+	 * AT#XMQTTPUB="topic","",qos,retain, or AT#XSEND=""). It must end without
+	 * CRLF; SEND_LINE adds it. */
+	DIALOG_SEND_LINE("%s", trigger_cmd);
+	DIALOG_LOOP_RUN(RESPONSE_TIMEOUT_S, {
+		DIALOG_LOOP_ABORT_ON_PFX("ERROR");
+		DIALOG_LOOP_BREAK_ON_STR("OK");
+	});
+	DIALOG_SEND_DATA(buf, len);
+	DIALOG_LOOP_RUN(RESPONSE_TIMEOUT_S, {
+		DIALOG_LOOP_ABORT_ON_PFX("ERROR");
+		DIALOG_LOOP_BREAK_ON_PFX("#XDATAMODE: ", xdm, sizeof(xdm));
+	});
+	/* Escape data-mode. LIMITATION: SLM's data-mode terminates on the literal
+	 * bytes "+++"; a payload that itself contains "+++" is truncated there and
+	 * its tail is fed to the AT parser. The length check below turns that into
+	 * a detectable -EPIPE rather than a silent short publish, but callers whose
+	 * payloads may contain "+++" need a length-framed transport instead. */
+	DIALOG_SEND_DATA("+++", 3);
+	if (!strlen(xdm)) {
+		DIALOG_ABORT(-EPIPE);
+	}
+	for (size_t i = 0; i < strlen(xdm); i++) {
+		if (!isdigit((int)xdm[i])) {
+			DIALOG_ABORT(-EPIPE);
+		}
+	}
+	if (len != strtol(xdm, NULL, 10)) {
+		DIALOG_ABORT(-EPIPE);
+	}
+	DIALOG_LOOP_RUN(RESPONSE_TIMEOUT_S, {
+		DIALOG_LOOP_ABORT_ON_PFX("ERROR");
+		DIALOG_LOOP_BREAK_ON_STR("#XDATAMODE: 0");
+	});
+	DIALOG_EXIT();
+
+	DIALOG_EPILOG /* clang-format on */
+}
+
 int ctr_lte_v2_talk_at_xsend_string(struct ctr_lte_v2_talk *talk, const void *buf, size_t len)
 {
 	DIALOG_PROLOG /* clang-format off */
@@ -1220,6 +1288,26 @@ int ctr_lte_v2_talk_at_cmd_with_resp(struct ctr_lte_v2_talk *talk, const char *s
 	DIALOG_ENTER();
 	DIALOG_SEND_LINE("%s", s);
 	DIALOG_LOOP_RUN(RESPONSE_TIMEOUT_S, {
+		DIALOG_LOOP_ABORT_ON_PFX("ERROR");
+		if (!DIALOG_LOOP_GATHER_GET_COUNT()) {
+			DIALOG_LOOP_GATHER(buf, size);
+		} else {
+			DIALOG_LOOP_BREAK_ON_STR("OK");
+		}
+	});
+	DIALOG_EXIT();
+
+	DIALOG_EPILOG /* clang-format on */
+}
+
+int ctr_lte_v2_talk_at_cmd_with_resp_long(struct ctr_lte_v2_talk *talk, const char *s, char *buf,
+					  size_t size)
+{
+	DIALOG_PROLOG /* clang-format off */
+
+	DIALOG_ENTER();
+	DIALOG_SEND_LINE("%s", s);
+	DIALOG_LOOP_RUN(RESPONSE_TIMEOUT_L, {
 		DIALOG_LOOP_ABORT_ON_PFX("ERROR");
 		if (!DIALOG_LOOP_GATHER_GET_COUNT()) {
 			DIALOG_LOOP_GATHER(buf, size);

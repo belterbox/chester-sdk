@@ -50,6 +50,8 @@ int ctr_lte_v2_talk_at_coneval(struct ctr_lte_v2_talk *talk, char *buf, size_t s
 int ctr_lte_v2_talk_at_cops_q(struct ctr_lte_v2_talk *talk, char *buf, size_t size);
 int ctr_lte_v2_talk_at_cops(struct ctr_lte_v2_talk *talk, int p1, int *p2, const char *p3);
 int ctr_lte_v2_talk_at_cpsms(struct ctr_lte_v2_talk *talk, int *p1, const char *p2, const char *p3);
+int ctr_lte_v2_talk_at_cedrxs(struct ctr_lte_v2_talk *talk, int mode, int act_type,
+			      const char *cycle);
 int ctr_lte_v2_talk_at_cscon(struct ctr_lte_v2_talk *talk, int p1);
 int ctr_lte_v2_talk_at_hwversion(struct ctr_lte_v2_talk *talk, char *buf, size_t size);
 int ctr_lte_v2_talk_at_mdmev(struct ctr_lte_v2_talk *talk, int p1);
@@ -69,6 +71,12 @@ int ctr_lte_v2_talk_at_xsendto(struct ctr_lte_v2_talk *talk, const char *p1, int
 			       const void *buf, size_t len);
 int ctr_lte_v2_talk_at_xsend(struct ctr_lte_v2_talk *talk, const void *buf, size_t len);
 int ctr_lte_v2_talk_at_xsend_string(struct ctr_lte_v2_talk *talk, const void *buf, size_t len);
+/* Send raw bytes to the modem via SLM data-mode. `trigger_cmd` is a caller-built
+ * AT command whose empty data argument puts SLM into data-mode (e.g.
+ * AT#XMQTTPUB="topic","",qos,retain, or AT#XSEND=""); the following bytes are
+ * sent raw and may contain any byte except the "+++" data-mode escape. */
+int ctr_lte_v2_talk_send_datamode(struct ctr_lte_v2_talk *talk, const char *trigger_cmd,
+				  const void *buf, size_t len);
 int ctr_lte_v2_talk_at_xrecv(struct ctr_lte_v2_talk *talk, int timeout, char *buf, size_t size,
 			     size_t *len);
 int ctr_lte_v2_talk_at_xsim(struct ctr_lte_v2_talk *talk, int p1);
@@ -89,6 +97,8 @@ int ctr_lte_v2_talk_crsm_214(struct ctr_lte_v2_talk *talk);
 int ctr_lte_v2_talk_at_cmd(struct ctr_lte_v2_talk *talk, const char *s);
 int ctr_lte_v2_talk_at_cmd_with_resp(struct ctr_lte_v2_talk *talk, const char *s, char *buf,
 				     size_t size);
+int ctr_lte_v2_talk_at_cmd_with_resp_long(struct ctr_lte_v2_talk *talk, const char *s, char *buf,
+					  size_t size);
 int ctr_lte_v2_talk_at_cmd_with_resp_prefix(struct ctr_lte_v2_talk *talk, const char *s, char *buf,
 					    size_t size, const char *pfx);
 

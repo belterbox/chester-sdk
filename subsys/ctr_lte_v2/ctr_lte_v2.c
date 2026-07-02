@@ -118,6 +118,185 @@ struct k_work m_gnss_work;
 
 static struct fsm_state_desc *get_fsm_state(enum fsm_state state);
 
+/* === Phase 2: multi-consumer registration support ===
+ *
+ * All helpers below are no-ops when zero consumers are registered, preserving
+ * pre-Phase-2 behaviour exactly. Registration is mutex-guarded; dispatch is
+ * called only from the FSM work queue, which already serialises every
+ * CONNECTED_BIT transition. */
+
+static K_MUTEX_DEFINE(m_consumers_lock);
+static const struct ctr_lte_v2_consumer *m_consumers[CONFIG_CTR_LTE_V2_MAX_CONSUMERS];
+static size_t m_consumer_count = 0;
+static bool m_consumers_notified_ready = false;
+
+/* Internal accessor for the registry — used by ctr_lte_v2_flow.c::process_urc.
+ * The pointer is stable for the program's lifetime and the count only grows
+ * (append-only, no removal). A lockless reader is safe because
+ * ctr_lte_v2_consumer_register() publishes the slot pointer before
+ * incrementing the count (compiler_barrier below), so a reader that observes
+ * a given count value always sees fully-written slots below it. */
+size_t ctr_lte_v2_consumers_get(const struct ctr_lte_v2_consumer *const **out)
+{
+	*out = m_consumers;
+	return m_consumer_count;
+}
+
+int ctr_lte_v2_consumer_register(const struct ctr_lte_v2_consumer *c)
+{
+	if (!c) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&m_consumers_lock, K_FOREVER);
+
+	for (size_t i = 0; i < m_consumer_count; i++) {
+		if (m_consumers[i] == c) {
+			k_mutex_unlock(&m_consumers_lock);
+			return 0; /* idempotent */
+		}
+	}
+
+	if (m_consumer_count >= ARRAY_SIZE(m_consumers)) {
+		k_mutex_unlock(&m_consumers_lock);
+		LOG_ERR("Consumer registry full (max %d)", (int)ARRAY_SIZE(m_consumers));
+		return -ENOSPC;
+	}
+
+	m_consumers[m_consumer_count] = c;
+	/* Publish the slot pointer before the count increment so a lockless
+	 * reader (process_urc on the link RX work queue) never observes an
+	 * incremented count that points at an unwritten slot. */
+	compiler_barrier();
+	m_consumer_count++;
+	LOG_INF("Registered consumer: %s", c->name ? c->name : "?");
+
+	k_mutex_unlock(&m_consumers_lock);
+	return 0;
+}
+
+/* Fire every registered consumer's on_prepare hook. Called from the FSM
+ * thread inside PREPARE while the modem is at CFUN=0 — the only window in
+ * which consumers may write to the modem key store. Unlike on_ready, this
+ * is NOT latched: it runs on every attach cycle, so consumer hooks must be
+ * idempotent (check-then-write). */
+static void dispatch_consumers_on_prepare(void)
+{
+	for (size_t i = 0; i < m_consumer_count; i++) {
+		const struct ctr_lte_v2_consumer *c = m_consumers[i];
+		if (c->on_prepare) {
+			LOG_DBG("dispatch on_prepare: %s", c->name ? c->name : "?");
+			c->on_prepare();
+		}
+	}
+}
+
+static void dispatch_consumers_on_ready(void)
+{
+	if (m_consumers_notified_ready) {
+		return;
+	}
+	m_consumers_notified_ready = true;
+	for (size_t i = 0; i < m_consumer_count; i++) {
+		const struct ctr_lte_v2_consumer *c = m_consumers[i];
+		if (c->on_ready) {
+			LOG_DBG("dispatch on_ready: %s", c->name ? c->name : "?");
+			c->on_ready();
+		}
+	}
+}
+
+static void dispatch_consumers_on_offline(void)
+{
+	if (!m_consumers_notified_ready) {
+		return;
+	}
+	m_consumers_notified_ready = false;
+	for (size_t i = 0; i < m_consumer_count; i++) {
+		const struct ctr_lte_v2_consumer *c = m_consumers[i];
+		if (c->on_offline) {
+			LOG_DBG("dispatch on_offline: %s", c->name ? c->name : "?");
+			c->on_offline();
+		}
+	}
+}
+
+static bool any_consumer_keeps_modem_reachable(void)
+{
+	for (size_t i = 0; i < m_consumer_count; i++) {
+		if (m_consumers[i]->keep_modem_reachable) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* === Phase 2: single-owner AT bus ===================================
+ *
+ * The modem AT bus has exactly one owner thread: the FSM work queue
+ * (m_work_q). All FSM dialogs run there, and ctr_cloud's send_recv is already
+ * marshalled onto it (see ctr_lte_v2_send_recv). Consumer AT calls must run on
+ * the SAME queue so a consumer thread never interleaves its request/response
+ * lines on the UART with an in-flight FSM dialog.
+ *
+ * ctr_lte_v2_run_on_bus() executes fn(arg) on m_work_q and returns its result:
+ *   - If the caller is already the m_work_q thread (e.g. a consumer on_prepare
+ *     hook, which the FSM invokes from PREPARE), fn runs inline — submitting
+ *     and waiting would self-deadlock the queue.
+ *   - Otherwise the request is queued (k_fifo, lock-free) and the caller blocks
+ *     on a per-request semaphore until the bus worker runs fn. No shared mutex:
+ *     the single-threaded work queue is the serialization point, and each
+ *     request carries its own completion semaphore.
+ */
+struct ctr_lte_v2_bus_req {
+	void *fifo_reserved; /* k_fifo bookkeeping (first word) */
+	int (*fn)(void *arg);
+	void *arg;
+	int result;
+	struct k_sem done;
+};
+
+static K_FIFO_DEFINE(m_bus_fifo);
+static struct k_work m_bus_work;
+
+static void bus_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	struct ctr_lte_v2_bus_req *req;
+
+	while ((req = k_fifo_get(&m_bus_fifo, K_NO_WAIT)) != NULL) {
+		req->result = req->fn(req->arg);
+		k_sem_give(&req->done);
+	}
+}
+
+int ctr_lte_v2_run_on_bus(int (*fn)(void *arg), void *arg)
+{
+	if (!fn) {
+		return -EINVAL;
+	}
+
+	/* Already on the bus thread (on_prepare / an FSM-dispatched URC): run
+	 * inline — queuing onto our own work queue and waiting would deadlock. */
+	if (k_current_get() == &m_work_q.thread) {
+		return fn(arg);
+	}
+
+	struct ctr_lte_v2_bus_req req = {
+		.fn = fn,
+		.arg = arg,
+	};
+	k_sem_init(&req.done, 0, 1);
+
+	k_fifo_put(&m_bus_fifo, &req);
+	k_work_submit_to_queue(&m_work_q, &m_bus_work);
+
+	/* fn carries its own AT-dialog timeout, so wait indefinitely for it to
+	 * run and complete; the queue may be busy with a long FSM transition. */
+	k_sem_take(&req.done, K_FOREVER);
+	return req.result;
+}
+
 static struct ctr_lte_v2_attach_timeout get_attach_timeout(int attempt)
 {
 	switch (g_ctr_lte_v2_config.attach_policy) {
@@ -529,6 +708,10 @@ int ctr_lte_v2_gnss_set_handler(ctr_lte_v2_gnss_cb callback, void *user_data)
 static int on_enter_disabled(void)
 {
 	int ret;
+	/* Reachability is lost here too — notify consumers so on_ready/on_offline
+	 * stays a matched edge pair (mirrors error/attach/open_socket). No-op
+	 * unless a consumer was previously notified ready. */
+	dispatch_consumers_on_offline();
 	ret = ctr_lte_v2_flow_disable(true);
 	if (ret) {
 		LOG_ERR("Call `ctr_lte_v2_flow_disable` failed: %d", ret);
@@ -587,6 +770,7 @@ static int on_enter_error(void)
 		return 0;
 	}
 
+	dispatch_consumers_on_offline();
 	k_event_clear(&m_states_event, CONNECTED_BIT);
 
 	if (ret == -ENOTSOCK) {
@@ -684,6 +868,27 @@ static int on_enter_prepare(void)
 	if (ret) {
 		LOG_ERR("Call `ctr_lte_v2_flow_prepare` failed: %d", ret);
 		return ret;
+	}
+
+	/* Consumer provisioning window — only when at least one consumer is
+	 * registered, so a ctr_cloud-only build keeps the exact pre-Phase-2
+	 * CFUN=0 -> CFUN=1 attach sequence (no extra CFUN=4 round-trip).
+	 *
+	 * flow_prepare leaves the modem at CFUN=0. Bring it to CFUN=4 (offline:
+	 * core powered, RF off): AT%CMNG works at 0 or 4, but on-device key
+	 * generation (AT%KEYGEN) needs the modem core powered — at CFUN=0 the
+	 * modem never answers it. RF stays off so we do not attach before the
+	 * key store is provisioned. */
+	if (m_consumer_count > 0) {
+		ret = ctr_lte_v2_flow_cfun(4);
+		if (ret) {
+			LOG_ERR("Call `ctr_lte_v2_flow_cfun(4)` failed: %d", ret);
+			return ret;
+		}
+
+		/* Give consumers their one chance to provision the key store
+		 * before we go online. */
+		dispatch_consumers_on_prepare();
 	}
 
 	ret = ctr_lte_v2_flow_cfun(1);
@@ -860,6 +1065,7 @@ static int on_enter_attach(void)
 
 	m_start = k_uptime_get_32();
 
+	dispatch_consumers_on_offline();
 	k_event_clear(&m_states_event, CONNECTED_BIT);
 
 	struct ctr_lte_v2_attach_timeout timeout = get_attach_timeout(m_attach_retry_count);
@@ -917,6 +1123,7 @@ static int on_leave_attach(void)
 
 static int on_enter_open_socket(void)
 {
+	dispatch_consumers_on_offline();
 	k_event_clear(&m_states_event, CONNECTED_BIT);
 
 	int ret = ctr_lte_v2_flow_open_socket();
@@ -935,6 +1142,7 @@ static int open_socket_event_handler(enum ctr_lte_v2_event event)
 	switch (event) {
 	case CTR_LTE_V2_EVENT_SOCKET_OPENED:
 		k_event_post(&m_states_event, CONNECTED_BIT);
+		dispatch_consumers_on_ready();
 		m_error_ctx.timeout_s = 0; /* Reset error timeout counter on success */
 		transition_state(FSM_STATE_CONEVAL);
 		break;
@@ -974,7 +1182,11 @@ static int on_enter_ready(void)
 			return ret;
 		}
 		if (m_cereg_param.active_time == -1) { /* PSM is not supported */
-			start_timer(K_MSEC(500));
+			/* Phase 2: skip the auto-offline timer when a consumer
+			 * needs the modem reachable for downlink (e.g. MQTT). */
+			if (!any_consumer_keeps_modem_reachable()) {
+				start_timer(K_MSEC(500));
+			}
 		}
 	}
 
@@ -1008,6 +1220,15 @@ static int ready_event_handler(enum ctr_lte_v2_event event)
 		atomic_clear_bit(&m_flag, FLAG_CSCON);
 		break;
 	case CTR_LTE_V2_EVENT_XMODMSLEEEP:
+		/* Phase 2: if any consumer needs the modem reachable for
+		 * downlink (e.g. MQTT subscribe), refuse to enter FSM-level
+		 * SLEEP — that disables UART and makes the modem unreachable
+		 * until the next outgoing send_recv wakes it up. The network's
+		 * eDRX still handles power management on the RF side. */
+		if (any_consumer_keeps_modem_reachable()) {
+			LOG_DBG("XMODEMSLEEP ignored — consumer needs reachability");
+			return 0;
+		}
 #if defined(CONFIG_CTR_LTE_V2_GNSS)
 		__fallthrough;
 	case CTR_LTE_V2_EVENT_XGPS_ENABLE:
@@ -1020,6 +1241,12 @@ static int ready_event_handler(enum ctr_lte_v2_event event)
 		break;
 	case CTR_LTE_V2_EVENT_TIMEOUT:
 		if (m_cereg_param.active_time == -1) { /* if PSM is not supported */
+			/* Phase 2: belt-and-braces. The on_enter_ready guard
+			 * normally prevents the timer from arming, but if any
+			 * future path arms it anyway, honour reachability. */
+			if (any_consumer_keeps_modem_reachable()) {
+				return 0;
+			}
 			LOG_WRN("PSM is not supported, disabling LTE modem to save power");
 			int ret = ctr_lte_v2_flow_close_socket();
 			if (ret) {
@@ -1051,6 +1278,11 @@ static int on_leave_ready(void)
 
 static int on_enter_sleep(void)
 {
+	/* Auto-sleep disables the UART/link — the modem becomes unreachable, so
+	 * this is an on_ready->on_offline edge for consumers. No-op unless a
+	 * consumer was previously notified ready. (A consumer with
+	 * keep_modem_reachable=true suppresses the XMODEMSLEEP that leads here.) */
+	dispatch_consumers_on_offline();
 	int ret = ctr_lte_v2_flow_disable(true);
 	if (ret) {
 		LOG_ERR("Call `ctr_lte_v2_flow_disable` failed: %d", ret);
@@ -1469,6 +1701,7 @@ static int init(void)
 
 	k_work_init_delayable(&m_timeout_work, timeout_work_handler);
 	k_work_init(&m_event_dispatch_work, event_dispatch_work_handler);
+	k_work_init(&m_bus_work, bus_work_handler);
 	ring_buf_init(&m_event_rb, sizeof(m_event_buf), m_event_buf);
 #if defined(CONFIG_CTR_LTE_V2_GNSS)
 	k_work_init(&m_gnss_work, gnss_work_handler);
